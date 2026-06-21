@@ -14,30 +14,42 @@ const http = require("http");
 // =========================
 const server = http.createServer((req, res) => {
     res.writeHead(200, { "Content-Type": "text/plain" });
-    res.end("EGO BOT is running\n");
+    res.end("EGO BOT RPG ONLINE\n");
 });
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, "0.0.0.0", () => {
-    console.log(`Serveur HTTP en écoute sur le port ${PORT}`);
+    console.log(`Serveur OK sur ${PORT}`);
 });
 
 // =========================
-// SAFE JSON HELPER
+// SAFE JSON
 // =========================
 function safeJSON(path, fallback = {}) {
     try {
         if (!fs.existsSync(path)) return fallback;
-        return JSON.parse(fs.readFileSync(path));
+        const data = fs.readFileSync(path, "utf8");
+        if (!data || data.trim() === "") return fallback;
+        return JSON.parse(data);
     } catch (e) {
+        console.log("⚠️ Reset JSON:", path);
+        fs.writeFileSync(path, JSON.stringify(fallback, null, 2));
         return fallback;
     }
+}
+
+// =========================
+// SAVE HELPER
+// =========================
+function save(path, data) {
+    fs.writeFileSync(path, JSON.stringify(data, null, 2));
 }
 
 // =========================
 // BOT START
 // =========================
 async function startBot() {
+
     const { state, saveCreds } = await useMultiFileAuthState("./session");
 
     const sock = makeWASocket({
@@ -47,51 +59,32 @@ async function startBot() {
     });
 
     // =========================
-    // PAIRING CODE
-    // =========================
-    if (!sock.authState.creds.registered) {
-        const phoneNumber = process.env.PHONE_NUMBER || "33665384876";
-
-        setTimeout(async () => {
-            try {
-                const code = await sock.requestPairingCode(phoneNumber);
-
-                console.log("====================================");
-                console.log("      🎴 EGO BOT PAIRING CODE");
-                console.log("====================================");
-                console.log(code);
-                console.log("====================================");
-            } catch (e) {
-                console.error("Pairing error:", e);
-            }
-        }, 4000);
-    }
-
-    sock.ev.on("creds.update", saveCreds);
-
-    // =========================
     // CONNECTION
     // =========================
     sock.ev.on("connection.update", (update) => {
+
         const { connection, lastDisconnect } = update;
 
         if (connection === "close") {
+
             const shouldReconnect =
                 (lastDisconnect?.error instanceof Boom)
                     ? lastDisconnect.error.output.statusCode !== DisconnectReason.loggedOut
                     : true;
 
-            console.log("Connexion fermée. Reconnexion :", shouldReconnect);
+            console.log("Connexion fermée :", shouldReconnect);
 
             if (shouldReconnect) startBot();
 
         } else if (connection === "open") {
-            console.log("✅ EGO BOT CONNECTÉ");
+            console.log("✅ EGO RPG BOT CONNECTÉ");
         }
     });
 
+    sock.ev.on("creds.update", saveCreds);
+
     // =========================
-    // MESSAGES
+    // MESSAGE SYSTEM
     // =========================
     sock.ev.on("messages.upsert", async ({ messages }) => {
 
@@ -108,13 +101,128 @@ async function startBot() {
             "";
 
         const cleanText = text.toLowerCase().trim();
+        const args = cleanText.split(" ").slice(1).join(" ");
 
         const from = m.key.remoteJid;
+        const user = (m.key.participant || m.key.remoteJid).split("@")[0];
+
+        const dbPath = "./data/story/players.json";
+        const db = safeJSON(dbPath, {});
+
+        if (!db[user]) {
+            db[user] = {
+                active: false,
+                state: "none",
+                step: 0
+            };
+        }
 
         // =========================
-        // PLUGINS SYSTEM (FIX ARGUMENTS)
+        // 🧠 RPG STATE ENGINE
+        // =========================
+
+        // 📌 FICHE CREATION
+        if (db[user].state === "creating") {
+
+            if (db[user].step === 1) {
+                db[user].nom = cleanText;
+                db[user].step = 2;
+
+                save(dbPath, db);
+
+                return sock.sendMessage(from, { text: "📌 Prénom ?" });
+            }
+
+            if (db[user].step === 2) {
+                db[user].prenom = cleanText;
+                db[user].step = 3;
+
+                save(dbPath, db);
+
+                return sock.sendMessage(from, { text: "📌 Village ?" });
+            }
+
+            if (db[user].step === 3) {
+                db[user].village = cleanText;
+                db[user].state = "openworld";
+                db[user].active = true;
+
+                save(dbPath, db);
+
+                return sock.sendMessage(from, {
+                    text:
+`🎉 FICHE TERMINÉE !
+
+Bienvenue ${db[user].prenom}
+
+🌍 Tape #explorer pour commencer`
+                });
+            }
+        }
+
+        // 📌 PNJ DIALOGUE
+        if (db[user].state === "dialogue") {
+
+            const pnj = db[user].pnj;
+
+            const lines = {
+                kakashi: [
+                    "Hmm intéressant...",
+                    "Tu progresses.",
+                    "Continue ton entraînement."
+                ],
+                naruto: [
+                    "Je deviendrai Hokage !",
+                    "On s'entraîne ensemble !",
+                    "Dattebayo !!"
+                ]
+            };
+
+            db[user].step++;
+
+            save(dbPath, db);
+
+            return sock.sendMessage(from, {
+                text: lines[pnj]?.[db[user].step] || "..."
+            });
+        }
+
+        // 📌 MISSION MULTI ETAPES
+        if (db[user].state === "mission") {
+
+            const mission = db[user].mission;
+
+            db[user].step++;
+
+            if (db[user].step >= mission.steps.length) {
+
+                db[user].state = "openworld";
+                db[user].exp += 50;
+                db[user].ryo += 10000;
+
+                save(dbPath, db);
+
+                return sock.sendMessage(from, {
+                    text:
+`🏆 MISSION TERMINÉE !
+
++50 EXP
++10000 Ryo`
+                });
+            }
+
+            save(dbPath, db);
+
+            return sock.sendMessage(from, {
+                text: mission.steps[db[user].step]
+            });
+        }
+
+        // =========================
+        // PLUGINS SYSTEM
         // =========================
         fs.readdirSync("./plugins").forEach(file => {
+
             if (!file.endsWith(".js")) return;
 
             delete require.cache[require.resolve(`./plugins/${file}`)];
@@ -122,31 +230,18 @@ async function startBot() {
 
             if (!cmd.command) return;
 
-            const command = cmd.command.toLowerCase();
+            if (cleanText.startsWith(cmd.command)) {
 
-            if (cleanText.startsWith(command)) {
+                const argsText = cleanText.slice(cmd.command.length).trim();
 
-                const args = cleanText.slice(command.length).trim();
-
-                cmd.handler(sock, m, cleanText, args);
+                cmd.handler(sock, m, cleanText, argsText, db);
             }
         });
 
         // =========================
-        // COMBATS SYSTEM
+        // SAVE AUTO
         // =========================
-        const dbPath = "./data/combats.json";
-
-        const db = safeJSON(dbPath, { active: {} });
-
-        if (!db.active) db.active = {};
-
-        if (db.active[from]) {
-            if (!cleanText.startsWith("#")) {
-                db.active[from].messages.push(cleanText);
-                fs.writeFileSync(dbPath, JSON.stringify(db, null, 2));
-            }
-        }
+        save(dbPath, db);
     });
 }
 
