@@ -9,7 +9,9 @@ const fs = require("fs");
 const pino = require("pino");
 const http = require("http");
 
-// Serveur HTTP (Render / Heroku)
+// =========================
+// SERVER (Render / Heroku)
+// =========================
 const server = http.createServer((req, res) => {
     res.writeHead(200, { "Content-Type": "text/plain" });
     res.end("EGO BOT is running\n");
@@ -20,6 +22,9 @@ server.listen(PORT, "0.0.0.0", () => {
     console.log(`Serveur HTTP en écoute sur le port ${PORT}`);
 });
 
+// =========================
+// BOT START
+// =========================
 async function startBot() {
     const { state, saveCreds } = await useMultiFileAuthState("./session");
 
@@ -29,7 +34,9 @@ async function startBot() {
         logger: pino({ level: "silent" })
     });
 
-    // Pairing code
+    // =========================
+    // PAIRING CODE
+    // =========================
     if (!sock.authState.creds.registered) {
         const phoneNumber = process.env.PHONE_NUMBER || "33665384876";
 
@@ -38,24 +45,27 @@ async function startBot() {
                 const code = await sock.requestPairingCode(phoneNumber);
 
                 console.log("====================================");
-                console.log("      🎴 EGO BOT - PAIRING CODE");
+                console.log("      🎴 EGO BOT PAIRING CODE");
                 console.log("====================================");
-                console.log(`CODE : ${code}`);
+                console.log(code);
                 console.log("====================================");
             } catch (e) {
-                console.error("Erreur pairing code :", e);
+                console.error("Pairing error:", e);
             }
-        }, 5000);
+        }, 4000);
     }
 
     sock.ev.on("creds.update", saveCreds);
 
+    // =========================
+    // CONNECTION
+    // =========================
     sock.ev.on("connection.update", (update) => {
         const { connection, lastDisconnect } = update;
 
         if (connection === "close") {
             const shouldReconnect =
-                (lastDisconnect.error instanceof Boom)
+                (lastDisconnect?.error instanceof Boom)
                     ? lastDisconnect.error.output.statusCode !== DisconnectReason.loggedOut
                     : true;
 
@@ -64,42 +74,59 @@ async function startBot() {
             if (shouldReconnect) startBot();
 
         } else if (connection === "open") {
-            console.log("✅ EGO BOT CONNECTÉ !");
+            console.log("✅ EGO BOT CONNECTÉ");
         }
     });
 
+    // =========================
+    // MESSAGES
+    // =========================
     sock.ev.on("messages.upsert", async ({ messages }) => {
         const m = messages[0];
         if (!m.message) return;
 
-        const text = (
-            m.message.conversation ||
-            m.message.extendedTextMessage?.text ||
-            ""
-        ).toLowerCase();
+        // 🔥 IMPORTANT FIX PARSING
+        const msg = m.message;
 
-        // plugins
+        const text =
+            msg.conversation ||
+            msg.extendedTextMessage?.text ||
+            msg.imageMessage?.caption ||
+            msg.videoMessage?.caption ||
+            "";
+
+        const cleanText = text.toLowerCase().trim();
+
+        const from = m.key.remoteJid;
+
+        // =========================
+        // PLUGINS SYSTEM
+        // =========================
         fs.readdirSync("./plugins").forEach(file => {
             if (file.endsWith(".js")) {
                 delete require.cache[require.resolve(`./plugins/${file}`)];
                 const cmd = require(`./plugins/${file}`);
-                if (text.startsWith(cmd.command)) {
-                    cmd.handler(sock, m, text);
+
+                if (cleanText.startsWith(cmd.command)) {
+                    cmd.handler(sock, m, cleanText);
                 }
             }
         });
 
-        // stockage combats
-        const from = m.key.remoteJid;
-
+        // =========================
+        // STOCKAGE COMBATS
+        // =========================
         const dbPath = "./data/combats.json";
-        if (!fs.existsSync(dbPath)) return;
+
+        if (!fs.existsSync(dbPath)) {
+            fs.writeFileSync(dbPath, JSON.stringify({ active: {} }, null, 2));
+        }
 
         const db = JSON.parse(fs.readFileSync(dbPath));
 
         if (db.active[from]) {
-            if (!text.startsWith("#")) {
-                db.active[from].messages.push(text);
+            if (!cleanText.startsWith("#")) {
+                db.active[from].messages.push(cleanText);
                 fs.writeFileSync(dbPath, JSON.stringify(db, null, 2));
             }
         }
