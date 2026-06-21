@@ -1,84 +1,109 @@
-import { join, dirname } from 'path'
-import { createRequire } from 'module'
-import { fileURLToPath } from 'url'
-import { setupMaster, fork } from 'cluster'
-import { watchFile, unwatchFile } from 'fs'
-import cfonts from 'cfonts'
-import { createInterface } from 'readline'
-import yargs from 'yargs'
-import chalk from 'chalk'
-import { promises as fsPromises } from 'fs'
+const {
+    default: makeWASocket,
+    useMultiFileAuthState,
+    DisconnectReason
+} = require("@whiskeysockets/baileys");
 
-let __dirname = dirname(fileURLToPath(import.meta.url))
-let require = createRequire(__dirname)
-let { say } = cfonts
-let rl = createInterface(process.stdin, process.stdout)
+const { Boom } = require("@hapi/boom");
+const fs = require("fs");
+const pino = require("pino");
+const http = require("http");
 
-say('Ai Hoshino', {
-  font: 'chrome',
-  align: 'center',
-  gradient: ['red', 'magenta']
-})
+// Serveur HTTP (Render / Heroku)
+const server = http.createServer((req, res) => {
+    res.writeHead(200, { "Content-Type": "text/plain" });
+    res.end("EGO BOT is running\n");
+});
 
-say(`Proximamente SenkoBot...`, {
-  font: 'console',
-  align: 'center',
-  gradient: ['red', 'magenta']
-})
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, "0.0.0.0", () => {
+    console.log(`Serveur HTTP en écoute sur le port ${PORT}`);
+});
 
-var isRunning = false
+async function startBot() {
+    const { state, saveCreds } = await useMultiFileAuthState("./session");
 
-async function start(files) {
-  if (isRunning) return
-  isRunning = true
-  
-  for (const file of files) {
-    const currentFilePath = new URL(import.meta.url).pathname
-    let args = [join(__dirname, file), ...process.argv.slice(2)]
-    say([process.argv[0], ...args].join(' '), {
-      font: 'console',
-      align: 'center',
-      gradient: ['red', 'magenta']
-    })
-    
-    setupMaster({
-      exec: args[0],
-      args: args.slice(1),
-    })
-    
-    let p = fork()
-    p.on('message', data => {
-      console.log('[RECEIVED]', data)
-      switch (data) {
-        case 'reset':
-          p.process.kill()
-          isRunning = false
-          start(files)
-          break
-        case 'uptime':
-          p.send(process.uptime())
-          break
-      }
-    })
-    
-    p.on('exit', (_, code) => {
-      isRunning = false
-      console.error('Ocurrió un error inesperado:', code)
-      start(files)
+    const sock = makeWASocket({
+        auth: state,
+        printQRInTerminal: false,
+        logger: pino({ level: "silent" })
+    });
 
-      if (code === 0) return
-      watchFile(args[0], () => {
-        unwatchFile(args[0])
-        start(files)
-      })
-    })
-    
-    let opts = new Object(yargs(process.argv.slice(2)).exitProcess(false).parse())
-    if (!opts['test'])
-      if (!rl.listenerCount()) rl.on('line', line => {
-        p.emit('message', line.trim())
-      })
-  }
+    // Pairing code
+    if (!sock.authState.creds.registered) {
+        const phoneNumber = process.env.PHONE_NUMBER || "33665384876";
+
+        setTimeout(async () => {
+            try {
+                const code = await sock.requestPairingCode(phoneNumber);
+
+                console.log("====================================");
+                console.log("      🎴 EGO BOT - PAIRING CODE");
+                console.log("====================================");
+                console.log(`CODE : ${code}`);
+                console.log("====================================");
+            } catch (e) {
+                console.error("Erreur pairing code :", e);
+            }
+        }, 5000);
+    }
+
+    sock.ev.on("creds.update", saveCreds);
+
+    sock.ev.on("connection.update", (update) => {
+        const { connection, lastDisconnect } = update;
+
+        if (connection === "close") {
+            const shouldReconnect =
+                (lastDisconnect.error instanceof Boom)
+                    ? lastDisconnect.error.output.statusCode !== DisconnectReason.loggedOut
+                    : true;
+
+            console.log("Connexion fermée. Reconnexion :", shouldReconnect);
+
+            if (shouldReconnect) startBot();
+
+        } else if (connection === "open") {
+            console.log("✅ EGO BOT CONNECTÉ !");
+        }
+    });
+
+    sock.ev.on("messages.upsert", async ({ messages }) => {
+        const m = messages[0];
+        if (!m.message) return;
+
+        const text = (
+            m.message.conversation ||
+            m.message.extendedTextMessage?.text ||
+            ""
+        ).toLowerCase();
+
+        // plugins
+        fs.readdirSync("./plugins").forEach(file => {
+            if (file.endsWith(".js")) {
+                delete require.cache[require.resolve(`./plugins/${file}`)];
+                const cmd = require(`./plugins/${file}`);
+                if (text.startsWith(cmd.command)) {
+                    cmd.handler(sock, m, text);
+                }
+            }
+        });
+
+        // stockage combats
+        const from = m.key.remoteJid;
+
+        const dbPath = "./data/combats.json";
+        if (!fs.existsSync(dbPath)) return;
+
+        const db = JSON.parse(fs.readFileSync(dbPath));
+
+        if (db.active[from]) {
+            if (!text.startsWith("#")) {
+                db.active[from].messages.push(text);
+                fs.writeFileSync(dbPath, JSON.stringify(db, null, 2));
+            }
+        }
+    });
 }
 
-start(['masha.js'])
+startBot();
