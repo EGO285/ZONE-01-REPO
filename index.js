@@ -1,136 +1,112 @@
-const {
-    default: makeWASocket,
-    useMultiFileAuthState,
-    DisconnectReason
-} = require("@whiskeysockets/baileys");
-
-const { Boom } = require("@hapi/boom");
 const fs = require("fs");
-const pino = require("pino");
-const http = require("http");
 
-// =========================
-// SERVER (Render / Heroku)
-// =========================
-const server = http.createServer((req, res) => {
-    res.writeHead(200, { "Content-Type": "text/plain" });
-    res.end("EGO BOT is running\n");
-});
+const dbPath = "./data/duels.json";
 
-const PORT = process.env.PORT || 3000;
-server.listen(PORT, "0.0.0.0", () => {
-    console.log(`Serveur HTTP en écoute sur le port ${PORT}`);
-});
-
-// =========================
-// BOT START
-// =========================
-async function startBot() {
-    const { state, saveCreds } = await useMultiFileAuthState("./session");
-
-    const sock = makeWASocket({
-        auth: state,
-        printQRInTerminal: false,
-        logger: pino({ level: "silent" })
-    });
-
-    // =========================
-    // PAIRING CODE
-    // =========================
-    if (!sock.authState.creds.registered) {
-        const phoneNumber = process.env.PHONE_NUMBER || "33665384876";
-
-        setTimeout(async () => {
-            try {
-                const code = await sock.requestPairingCode(phoneNumber);
-
-                console.log("====================================");
-                console.log("      🎴 EGO BOT PAIRING CODE");
-                console.log("====================================");
-                console.log(code);
-                console.log("====================================");
-            } catch (e) {
-                console.error("Pairing error:", e);
-            }
-        }, 4000);
+function loadDB() {
+    if (!fs.existsSync(dbPath)) {
+        fs.writeFileSync(dbPath, JSON.stringify({ active: {}, history: [] }, null, 2));
     }
-
-    sock.ev.on("creds.update", saveCreds);
-
-    // =========================
-    // CONNECTION
-    // =========================
-    sock.ev.on("connection.update", (update) => {
-        const { connection, lastDisconnect } = update;
-
-        if (connection === "close") {
-            const shouldReconnect =
-                (lastDisconnect?.error instanceof Boom)
-                    ? lastDisconnect.error.output.statusCode !== DisconnectReason.loggedOut
-                    : true;
-
-            console.log("Connexion fermée. Reconnexion :", shouldReconnect);
-
-            if (shouldReconnect) startBot();
-
-        } else if (connection === "open") {
-            console.log("✅ EGO BOT CONNECTÉ");
-        }
-    });
-
-    // =========================
-    // MESSAGES
-    // =========================
-    sock.ev.on("messages.upsert", async ({ messages }) => {
-        const m = messages[0];
-        if (!m.message) return;
-
-        // 🔥 IMPORTANT FIX PARSING
-        const msg = m.message;
-
-        const text =
-            msg.conversation ||
-            msg.extendedTextMessage?.text ||
-            msg.imageMessage?.caption ||
-            msg.videoMessage?.caption ||
-            "";
-
-        const cleanText = text.toLowerCase().trim();
-
-        const from = m.key.remoteJid;
-
-        // =========================
-        // PLUGINS SYSTEM
-        // =========================
-        fs.readdirSync("./plugins").forEach(file => {
-            if (file.endsWith(".js")) {
-                delete require.cache[require.resolve(`./plugins/${file}`)];
-                const cmd = require(`./plugins/${file}`);
-
-                if (cleanText.startsWith(cmd.command)) {
-                    cmd.handler(sock, m, cleanText);
-                }
-            }
-        });
-
-        // =========================
-        // STOCKAGE COMBATS
-        // =========================
-        const dbPath = "./data/combats.json";
-
-        if (!fs.existsSync(dbPath)) {
-            fs.writeFileSync(dbPath, JSON.stringify({ active: {} }, null, 2));
-        }
-
-        const db = JSON.parse(fs.readFileSync(dbPath));
-
-        if (db.active[from]) {
-            if (!cleanText.startsWith("#")) {
-                db.active[from].messages.push(cleanText);
-                fs.writeFileSync(dbPath, JSON.stringify(db, null, 2));
-            }
-        }
-    });
+    return JSON.parse(fs.readFileSync(dbPath));
 }
 
-startBot();
+function saveDB(db) {
+    fs.writeFileSync(dbPath, JSON.stringify(db, null, 2));
+}
+
+module.exports = {
+    command: "#duel",
+
+    async handler(sock, m, text) {
+        const from = m.key.remoteJid;
+
+        let db = loadDB();
+
+        const args = text.split(" ");
+
+        // =========================
+        // 🟢 START DUEL
+        // =========================
+        if (args[1] === "debut") {
+
+            const players = text.split("@").slice(1);
+
+            if (players.length < 2) {
+                return sock.sendMessage(from, {
+                    text: "❌ Format : #duel debut @joueur1 vs @joueur2"
+                });
+            }
+
+            db.active[from] = {
+                p1: players[0].split(" ")[0],
+                p2: players[1].split(" ")[0],
+                start: new Date().toISOString()
+            };
+
+            saveDB(db);
+
+            return sock.sendMessage(from, {
+                text: `⚔️ DUEL DÉMARRÉ !
+
+🥷 Joueur 1 : @${db.active[from].p1}
+🥷 Joueur 2 : @${db.active[from].p2}
+
+⏱️ Début : ${new Date().toLocaleString()}`
+            });
+        }
+
+        // =========================
+        // 🔴 END DUEL
+        // =========================
+        if (args[1] === "off") {
+
+            if (!db.active[from]) {
+                return sock.sendMessage(from, {
+                    text: "❌ Aucun duel actif dans ce chat."
+                });
+            }
+
+            const winner = text.split("winner:")[1] ?.trim();
+
+            if (!winner) {
+                return sock.sendMessage(from, {
+                    text: "❌ Format : #duel off winner: @joueur"
+                });
+            }
+
+            const duel = db.active[from];
+
+            const record = {
+                p1: duel.p1,
+                p2: duel.p2,
+                winner: winner.replace("@", ""),
+                start: duel.start,
+                end: new Date().toISOString()
+            };
+
+            db.history.push(record);
+            delete db.active[from];
+
+            saveDB(db);
+
+            return sock.sendMessage(from, {
+                text: `🏁 DUEL TERMINÉ !
+
+🥷 P1 : @${record.p1}
+🥷 P2 : @${record.p2}
+
+🏆 Vainqueur : @${record.winner}
+📅 Fin : ${new Date().toLocaleString()}`
+            });
+        }
+
+        // =========================
+        // ❌ ERREUR
+        // =========================
+        return sock.sendMessage(from, {
+            text: `⚔️ DUEL SYSTEM
+
+👉 #duel debut @p1 vs @p2
+👉 #duel off winner: @joueur`
+        });
+    }
+};
