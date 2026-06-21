@@ -28,18 +28,20 @@ server.listen(PORT, "0.0.0.0", () => {
 function safeJSON(path, fallback = {}) {
     try {
         if (!fs.existsSync(path)) return fallback;
+
         const data = fs.readFileSync(path, "utf8");
         if (!data || data.trim() === "") return fallback;
+
         return JSON.parse(data);
     } catch (e) {
-        console.log("⚠️ Reset JSON:", path);
+        console.log("⚠️ JSON RESET :", path);
         fs.writeFileSync(path, JSON.stringify(fallback, null, 2));
         return fallback;
     }
 }
 
 // =========================
-// SAVE HELPER
+// SAVE
 // =========================
 function save(path, data) {
     fs.writeFileSync(path, JSON.stringify(data, null, 2));
@@ -59,9 +61,9 @@ async function startBot() {
     });
 
     // =========================
-    // CONNECTION
+    // CONNECTION FIX (PAIRING SAFE)
     // =========================
-    sock.ev.on("connection.update", (update) => {
+    sock.ev.on("connection.update", async (update) => {
 
         const { connection, lastDisconnect } = update;
 
@@ -72,11 +74,12 @@ async function startBot() {
                     ? lastDisconnect.error.output.statusCode !== DisconnectReason.loggedOut
                     : true;
 
-            console.log("Connexion fermée :", shouldReconnect);
+            console.log("❌ Connexion fermée :", shouldReconnect);
 
             if (shouldReconnect) startBot();
+        }
 
-        } else if (connection === "open") {
+        if (connection === "open") {
             console.log("✅ EGO RPG BOT CONNECTÉ");
         }
     });
@@ -101,7 +104,8 @@ async function startBot() {
             "";
 
         const cleanText = text.toLowerCase().trim();
-        const args = cleanText.split(" ").slice(1).join(" ");
+
+        const argsText = cleanText.split(" ").slice(1).join(" ");
 
         const from = m.key.remoteJid;
         const user = (m.key.participant || m.key.remoteJid).split("@")[0];
@@ -109,19 +113,22 @@ async function startBot() {
         const dbPath = "./data/story/players.json";
         const db = safeJSON(dbPath, {});
 
+        // =========================
+        // INIT PLAYER SAFE
+        // =========================
         if (!db[user]) {
             db[user] = {
                 active: false,
                 state: "none",
-                step: 0
+                step: 0,
+                exp: 0,
+                ryo: 0
             };
         }
 
         // =========================
-        // 🧠 RPG STATE ENGINE
+        // 🧠 FICHE CREATION
         // =========================
-
-        // 📌 FICHE CREATION
         if (db[user].state === "creating") {
 
             if (db[user].step === 1) {
@@ -160,7 +167,9 @@ Bienvenue ${db[user].prenom}
             }
         }
 
-        // 📌 PNJ DIALOGUE
+        // =========================
+        // 🧠 PNJ DIALOGUE
+        // =========================
         if (db[user].state === "dialogue") {
 
             const pnj = db[user].pnj;
@@ -187,7 +196,9 @@ Bienvenue ${db[user].prenom}
             });
         }
 
-        // 📌 MISSION MULTI ETAPES
+        // =========================
+        // 🎯 MISSIONS
+        // =========================
         if (db[user].state === "mission") {
 
             const mission = db[user].mission;
@@ -197,6 +208,7 @@ Bienvenue ${db[user].prenom}
             if (db[user].step >= mission.steps.length) {
 
                 db[user].state = "openworld";
+
                 db[user].exp += 50;
                 db[user].ryo += 10000;
 
@@ -232,14 +244,12 @@ Bienvenue ${db[user].prenom}
 
             if (cleanText.startsWith(cmd.command)) {
 
-                const argsText = cleanText.slice(cmd.command.length).trim();
-
                 cmd.handler(sock, m, cleanText, argsText, db);
             }
         });
 
         // =========================
-        // SAVE AUTO
+        // AUTO SAVE SAFE
         // =========================
         save(dbPath, db);
     });
